@@ -24,6 +24,7 @@ import sys
 import os
 import subprocess
 import json
+import re
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -34,59 +35,164 @@ from PyQt6.QtCore import QTimer, Qt, QProcess
 from PyQt6.QtGui import QFont, QAction
 
 
-class GPUInfo:
-    IGPU_PCI = "0000:6c:00.0"
-    DGPU_PCI = "0000:03:00.0"
+class GPU:
+    """Represents a detected GPU"""
+    def __init__(self, card_id, card_path, pci_slot):
+        self.card_id = card_id  # e.g., "card0"
+        self.card_path = card_path  # e.g., "/dev/dri/card0"
+        self.pci_slot = pci_slot  # e.g., "0000:03:00.0"
+        self.name = "Unknown GPU"
+        self.vendor = "Unknown"
+        self.driver = "Unknown"
+        self.is_boot_vga = False
+        self._load_info()
     
-    @staticmethod
-    def get_gpu_stats():
-        stats = {"igpu": {}, "dgpu": {}}
+    def _load_info(self):
+        pci_path = f"/sys/bus/pci/devices/{self.pci_slot}"
         
+        # Get vendor and device
+        try:
+            vendor_id = Path(f"{pci_path}/vendor").read_text().strip()
+            device_id = Path(f"{pci_path}/device").read_text().strip()
+            self.vendor = self._vendor_name(vendor_id)
+        except:
+            pass
+        
+        # Get GPU name from lspci
         try:
             result = subprocess.run(
-                ["rocm-smi", "--showallinfo", "--json"], 
-                capture_output=True, text=True, timeout=10
+                ["lspci", "-s", self.pci_slot, "-v"],
+                capture_output=True, text=True, timeout=5
             )
-            if result.returncode == 0:
-                json_str = result.stdout.split("{", 1)
-                if len(json_str) > 1:
-                    json_str = "{" + json_str[1]
-                    data = json.loads(json_str)
-                    
-                    for card_id, card_data in data.items():
-                        if card_id.startswith("card"):
-                            pci = card_data.get("PCI Bus", "").lower()
-                            is_dgpu = pci == GPUInfo.DGPU_PCI.lower()
-                            key = "dgpu" if is_dgpu else "igpu"
-                            
-                            stats[key] = {
-                                "name": card_data.get("Card Series", "Unknown"),
-                                "gpu_util": GPUInfo._parse_int(card_data.get("GPU use (%)", 0)),
-                                "temp": GPUInfo._parse_float(card_data.get("Temperature (Sensor edge) (C)", 0)),
-                                "power": GPUInfo._parse_float(card_data.get("Average Graphics Package Power (W)", 0)),
-                                "pci": pci,
-                            }
-        except Exception as e:
-            print(f"rocm-smi error: {e}")
+            for line in result.stdout.split('\n'):
+                if 'VGA' in line or '3D' in line or 'Display' in line:
+                    # Extract name after the colon
+                    parts = line.split(':', 2)
+                    if len(parts) > 2:
+                        self.name = parts[2].strip()
+                    break
+        except:
+            pass
         
-        for key, pci in [("dgpu", GPUInfo.DGPU_PCI), ("igpu", GPUInfo.IGPU_PCI)]:
-            if not stats[key].get("name"):
-                stats[key]["name"] = "Unknown"
-                stats[key]["pci"] = pci
+        # Get driver
+        try:
+            driver_link = Path(f"{pci_path}/driver")
+            if driver_link.is_symlink():
+                self.driver = driver_link.resolve().name
+        except:
+            pass
+        
+        # Check if boot VGA
+        try:
+            boot_vga = Path(f"{pci_path}/boot_vga").read_text().strip()
+            self.is_boot_vga = boot_vga == "1"
+        except:
+            pass
+    
+    def _vendor_name(self, vendor_id):
+        vendors = {
+            "0x1002": "AMD",
+            "0x8086": "Intel",
+            "0x10de": "NVIDIA",
+            "0x1022": "AMD",
+        }
+        return vendors.get(vendor_id, f"Vendor {vendor_id}")
+    
+    def display_name(self):
+        """Human-readable name for UI"""
+        boot_tag = " [Boot VGA]" if self.is_boot_vga else ""
+        return f"{self.name} ({self.card_id}){boot_tag}"
+    
+    def drm_device(self):
+        return f"/dev/dri/{self.card_id}"
+
+
+class GPUInfo:
+    """Detects and manages GPUs"""
+    
+    @staticmethod
+    def detect_gpus():
+        """Detect all available GPUs"""
+        gpus = []
+        
+        # Scan /sys/class/drm for card devices
+        drm_path = Path("/sys/class/drm")
+        if not drm_path.exists():
+            return gpus
+        
+        for card_dir in sorted(drm_path.iterdir()):
+            if not card_dir.name.startswith("card") or "-" in card_dir.name:
+                continue
             
+            card_id = card_dir.name
+            card_path = f"/dev/dri/{card_id}"
+            
+            # Get PCI slot
+            device_link = card_dir / "device"
+            if not device_link.is_symlink():
+                continue
+            
+            pci_slot = device_link.resolve().name
+            if not pci_slot.startswith("0000:"):
+                continue
+            
+            gpu = GPU(card_id, card_path, pci_slot)
+            gpus.append(gpu)
+        
+        return gpus
+    
+    @staticmethod
+    def get_gpu_stats(gpus):
+        """Get stats for all detected GPUs"""
+        stats = {}
+        
+        for gpu in gpus:
+            key = gpu.card_id
+            stats[key] = {
+                "name": gpu.name,
+                "card_id": gpu.card_id,
+                "vram_total": 0,
+                "vram_used": 0,
+                "gpu_util": 0,
+                "temp": 0,
+                "power": 0,
+            }
+            
+            # Get VRAM from sysfs
+            pci_path = f"/sys/bus/pci/devices/{gpu.pci_slot}"
             try:
-                mem = Path(f"/sys/bus/pci/devices/{pci}/mem_info_vram_total")
+                mem = Path(f"{pci_path}/mem_info_vram_total")
                 if mem.exists():
                     stats[key]["vram_total"] = int(mem.read_text()) / (1024*1024)
             except:
-                stats[key]["vram_total"] = 0
-                
+                pass
+            
             try:
-                mem = Path(f"/sys/bus/pci/devices/{pci}/mem_info_vram_used")
+                mem = Path(f"{pci_path}/mem_info_vram_used")
                 if mem.exists():
                     stats[key]["vram_used"] = int(mem.read_text()) / (1024*1024)
             except:
-                stats[key]["vram_used"] = 0
+                pass
+            
+            # Try rocm-smi for AMD GPUs
+            if gpu.vendor == "AMD":
+                try:
+                    result = subprocess.run(
+                        ["rocm-smi", "--showallinfo", "--json"],
+                        capture_output=True, text=True, timeout=10
+                    )
+                    if result.returncode == 0:
+                        json_str = result.stdout.split("{", 1)
+                        if len(json_str) > 1:
+                            data = json.loads("{" + json_str[1])
+                            for card_id, card_data in data.items():
+                                if card_data.get("PCI Bus", "").lower() == gpu.pci_slot.lower():
+                                    stats[key]["gpu_util"] = GPUInfo._parse_int(card_data.get("GPU use (%)", 0))
+                                    stats[key]["temp"] = GPUInfo._parse_float(card_data.get("Temperature (Sensor edge) (C)", 0))
+                                    stats[key]["power"] = GPUInfo._parse_float(card_data.get("Average Graphics Package Power (W)", 0))
+                                    break
+                except:
+                    pass
         
         return stats
     
@@ -112,6 +218,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(700, 800)
         
         self.info_labels = {}
+        self.gpus = []
         
         self.refresh_timer = QTimer()
         self.refresh_timer.timeout.connect(self.refresh_stats)
@@ -130,10 +237,8 @@ class MainWindow(QMainWindow):
         status_group = QGroupBox("GPU Status")
         status_layout = QVBoxLayout()
         
-        cards_layout = QHBoxLayout()
-        cards_layout.addWidget(self.create_gpu_card("iGPU (Desktop)", "igpu"))
-        cards_layout.addWidget(self.create_gpu_card("dGPU (Games/AI)", "dgpu"))
-        status_layout.addLayout(cards_layout)
+        self.gpu_cards_layout = QHBoxLayout()
+        status_layout.addLayout(self.gpu_cards_layout)
         status_group.setLayout(status_layout)
         layout.addWidget(status_group)
         
@@ -146,7 +251,7 @@ class MainWindow(QMainWindow):
         warning_text.setMaximumHeight(60)
         warning_text.setStyleSheet("background-color: #fff3cd; color: #856404; border: 2px solid #ffc107;")
         warning_text.setHtml("""
-        <p><b>Changing GPU configuration can cause:</b> black screen, display output switching between motherboard and dedicated GPU, or session crash. Make sure you know which GPU your monitor is physically connected to.</p>
+        <p><b>Changing GPU configuration can cause:</b> black screen, display output switching between GPUs, or session crash. Make sure you know which GPU your monitor is physically connected to.</p>
         """)
         warning_layout.addWidget(warning_text)
         warning_group.setLayout(warning_layout)
@@ -161,10 +266,10 @@ class MainWindow(QMainWindow):
         bios_text.setMaximumHeight(120)
         bios_text.setStyleSheet("background-color: #e8f5e9; color: #1b5e20; border: 2px solid #4caf50;")
         bios_text.setHtml("""
-        <p><b>For iGPU desktop configuration to work, your BIOS must be configured correctly:</b></p>
+        <p><b>For GPU configuration to work, your BIOS must be configured correctly:</b></p>
         <ul>
             <li><b>iGPU Multi-Monitor / IGPU Multi-Display:</b> Must be <b>Enabled</b></li>
-            <li><b>Primary Display / Initiate Graphic Adapter:</b> Set to <b>iGPU</b> or <b>Auto</b> (NOT PCIe/dGPU)</li>
+            <li><b>Primary Display / Initiate Graphic Adapter:</b> Set to desired GPU or <b>Auto</b></li>
             <li><b>Above 4G Decoding:</b> Should be <b>Enabled</b></li>
         </ul>
         <p>If these settings are wrong, the system will ignore software GPU assignment.</p>
@@ -202,30 +307,27 @@ class MainWindow(QMainWindow):
         detailed_group = QGroupBox("Detailed Configuration")
         detailed_layout = QVBoxLayout()
         
+        # Login screen selection
         login_layout = QHBoxLayout()
         login_layout.addWidget(QLabel("Login Screen (SDDM):"))
         self.login_combo = QComboBox()
-        self.login_combo.addItem("iGPU (Recommended)", "igpu")
-        self.login_combo.addItem("dGPU", "dgpu")
         self.login_combo.currentIndexChanged.connect(self.update_compatibility)
         login_layout.addWidget(self.login_combo)
         detailed_layout.addLayout(login_layout)
         
+        # Desktop rendering selection
         render_layout = QHBoxLayout()
         render_layout.addWidget(QLabel("Desktop Rendering:"))
         self.render_combo = QComboBox()
-        self.render_combo.addItem("iGPU (Recommended)", "igpu")
-        self.render_combo.addItem("dGPU", "dgpu")
         self.render_combo.currentIndexChanged.connect(self.update_compatibility)
         render_layout.addWidget(self.render_combo)
         detailed_layout.addLayout(render_layout)
         
+        # Display output selection
         display_layout = QHBoxLayout()
         display_layout.addWidget(QLabel("Display Output:"))
         self.display_combo = QComboBox()
         self.display_combo.addItem("Same as Rendering", "same")
-        self.display_combo.addItem("dGPU (Monitor on dGPU)", "dgpu")
-        self.display_combo.addItem("iGPU (Monitor on motherboard)", "igpu")
         self.display_combo.currentIndexChanged.connect(self.update_compatibility)
         display_layout.addWidget(self.display_combo)
         detailed_layout.addLayout(display_layout)
@@ -274,10 +376,55 @@ class MainWindow(QMainWindow):
         layout.addWidget(log_group)
         
         self.check_current_config()
-        self.update_compatibility()
     
-    def create_gpu_card(self, title, key):
-        group = QGroupBox(title)
+    def refresh_gpu_list(self):
+        """Detect GPUs and update UI"""
+        self.gpus = GPUInfo.detect_gpus()
+        
+        # Update combo boxes with detected GPUs
+        for combo in [self.login_combo, self.render_combo]:
+            combo.clear()
+            for gpu in self.gpus:
+                combo.addItem(gpu.display_name(), gpu.card_id)
+        
+        # Update display combo
+        self.display_combo.clear()
+        self.display_combo.addItem("Same as Rendering", "same")
+        for gpu in self.gpus:
+            self.display_combo.addItem(gpu.display_name(), gpu.card_id)
+        
+        # Update GPU status cards
+        self._update_gpu_cards()
+        
+        # Update presets visibility
+        if len(self.gpus) < 2:
+            self.preset_recommended.setEnabled(False)
+            self.preset_recommended.setToolTip("Requires at least 2 GPUs")
+            self.preset_igpu_only.setEnabled(False)
+            self.preset_igpu_only.setToolTip("Requires at least 2 GPUs")
+        else:
+            self.preset_recommended.setEnabled(True)
+            self.preset_recommended.setToolTip("")
+            self.preset_igpu_only.setEnabled(True)
+            self.preset_igpu_only.setToolTip("")
+    
+    def _update_gpu_cards(self):
+        """Create or update GPU status cards"""
+        # Clear existing cards
+        while self.gpu_cards_layout.count():
+            item = self.gpu_cards_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        self.info_labels = {}
+        
+        for gpu in self.gpus:
+            card = self._create_gpu_card(gpu)
+            self.gpu_cards_layout.addWidget(card)
+    
+    def _create_gpu_card(self, gpu):
+        """Create a status card for a GPU"""
+        group = QGroupBox(gpu.display_name())
         layout = QVBoxLayout()
         
         tooltips = {
@@ -296,7 +443,7 @@ class MainWindow(QMainWindow):
             
             value = QLabel("--")
             value.setToolTip(tooltips.get(field, ""))
-            self.info_labels[f"{key}_{field}"] = value
+            self.info_labels[f"{gpu.card_id}_{field}"] = value
             
             row.addWidget(label)
             row.addWidget(value)
@@ -306,122 +453,142 @@ class MainWindow(QMainWindow):
             if field == "vram":
                 bar = QProgressBar()
                 bar.setTextVisible(True)
-                self.info_labels[f"{key}_vram_bar"] = bar
+                self.info_labels[f"{gpu.card_id}_vram_bar"] = bar
                 layout.addWidget(bar)
             
             if field == "gpu_util":
                 bar = QProgressBar()
                 bar.setTextVisible(True)
-                self.info_labels[f"{key}_util_bar"] = bar
+                self.info_labels[f"{gpu.card_id}_util_bar"] = bar
                 layout.addWidget(bar)
         
         group.setLayout(layout)
         return group
     
     def update_compatibility(self):
-        render = self.render_combo.currentData()
-        display = self.display_combo.currentData()
+        render_idx = self.render_combo.currentIndex()
+        display_idx = self.display_combo.currentIndex()
         
-        if render == "igpu" and display == "dgpu":
-            self.compat_status.setText("Compatible: PRIME offload - Desktop renders on iGPU, display outputs through dGPU. Recommended.")
+        render_data = self.render_combo.currentData()
+        display_data = self.display_combo.currentData()
+        
+        render_name = self.render_combo.currentText()
+        display_name = self.display_combo.currentText()
+        
+        if display_data == "same":
+            self.compat_status.setText(f"Compatible: Desktop renders and displays on {render_name}.")
             self.compat_status.setStyleSheet("color: #27ae60;")
-        elif render == "igpu" and display == "igpu":
-            self.compat_status.setText("Compatible: All desktop tasks on iGPU. Use if monitor is on motherboard output.")
+        else:
+            self.compat_status.setText(f"Compatible: Desktop renders on {render_name}, display outputs through {display_name}.")
             self.compat_status.setStyleSheet("color: #27ae60;")
-        elif render == "igpu" and display == "same":
-            self.compat_status.setText("Compatible: Desktop renders and displays on iGPU.")
-            self.compat_status.setStyleSheet("color: #27ae60;")
-        elif render == "dgpu" and display == "dgpu":
-            self.compat_status.setText("Compatible: All desktop tasks on dGPU. Uses dGPU VRAM for desktop.")
-            self.compat_status.setStyleSheet("color: #f39c12;")
-        elif render == "dgpu" and display == "igpu":
-            self.compat_status.setText("Compatible but unusual: Reverse PRIME. May have performance overhead.")
-            self.compat_status.setStyleSheet("color: #e67e22;")
-        elif render == "dgpu" and display == "same":
-            self.compat_status.setText("Compatible: Desktop renders and displays on dGPU.")
-            self.compat_status.setStyleSheet("color: #f39c12;")
     
     def apply_preset(self, preset):
+        if len(self.gpus) < 2:
+            return
+        
+        # Find iGPU (usually Intel or AMD integrated)
+        igpu = None
+        dgpu = None
+        
+        for gpu in self.gpus:
+            if gpu.vendor in ["Intel"] or (gpu.vendor == "AMD" and "Ryzen" in gpu.name):
+                igpu = gpu
+            elif gpu.vendor in ["AMD", "NVIDIA"] and "Radeon" in gpu.name or "GeForce" in gpu.name or "RTX" in gpu.name or "RX" in gpu.name:
+                dgpu = gpu
+        
+        # Fallback: first GPU is iGPU, second is dGPU
+        if not igpu:
+            igpu = self.gpus[0]
+        if not dgpu:
+            dgpu = self.gpus[1] if len(self.gpus) > 1 else self.gpus[0]
+        
         if preset == "hybrid":
-            self.render_combo.setCurrentText("iGPU (Recommended)")
-            self.display_combo.setCurrentText("dGPU (Monitor on dGPU)")
-            self.login_combo.setCurrentText("iGPU (Recommended)")
+            # Set rendering to iGPU
+            for i in range(self.render_combo.count()):
+                if self.render_combo.itemData(i) == igpu.card_id:
+                    self.render_combo.setCurrentIndex(i)
+                    break
+            
+            # Set display to dGPU
+            for i in range(self.display_combo.count()):
+                if self.display_combo.itemData(i) == dgpu.card_id:
+                    self.display_combo.setCurrentIndex(i)
+                    break
+            
+            # Set login to iGPU
+            for i in range(self.login_combo.count()):
+                if self.login_combo.itemData(i) == igpu.card_id:
+                    self.login_combo.setCurrentIndex(i)
+                    break
+                    
         elif preset == "igpu":
-            self.render_combo.setCurrentText("iGPU (Recommended)")
-            self.display_combo.setCurrentText("iGPU (Monitor on motherboard)")
-            self.login_combo.setCurrentText("iGPU (Recommended)")
+            for i in range(self.render_combo.count()):
+                if self.render_combo.itemData(i) == igpu.card_id:
+                    self.render_combo.setCurrentIndex(i)
+                    break
+            
+            for i in range(self.display_combo.count()):
+                if self.display_combo.itemData(i) == igpu.card_id:
+                    self.display_combo.setCurrentIndex(i)
+                    break
+            
+            for i in range(self.login_combo.count()):
+                if self.login_combo.itemData(i) == igpu.card_id:
+                    self.login_combo.setCurrentIndex(i)
+                    break
+                    
         elif preset == "default":
             self.revert_config()
             return
+        
         self.update_compatibility()
     
     def check_current_config(self):
-        plasma_igpu = False
-        plasma_hybrid = False
+        # Check for any profile.d configs
+        plasma_config = None
         sddm_configured = False
         
-        plasma_igpu_file = Path("/etc/profile.d/kwin-igpu.sh")
-        plasma_hybrid_file = Path("/etc/profile.d/kwin-hybrid.sh")
-        
-        if plasma_igpu_file.exists():
-            content = plasma_igpu_file.read_text()
-            if "KWIN_DRM_DEVICES=/dev/dri/card1" in content and "card0" not in content:
-                plasma_igpu = True
-        
-        if plasma_hybrid_file.exists():
-            content = plasma_hybrid_file.read_text()
-            if "KWIN_DRM_DEVICES=/dev/dri/card1:/dev/dri/card0" in content:
-                plasma_hybrid = True
+        for config_file in Path("/etc/profile.d").glob("kwin-*.sh"):
+            content = config_file.read_text()
+            if "KWIN_DRM_DEVICES=" in content:
+                plasma_config = config_file.name
         
         sddm_override = Path("/etc/systemd/system/sddm.service.d/override.conf")
         if sddm_override.exists():
             content = sddm_override.read_text()
-            if "KWIN_DRM_DEVICES=/dev/dri/card1" in content:
+            if "KWIN_DRM_DEVICES=" in content:
                 sddm_configured = True
         
-        if plasma_hybrid and sddm_configured:
-            self.config_status_label.setText("Hybrid Plasma + SDDM configured (render on iGPU, display on dGPU)")
+        if plasma_config and sddm_configured:
+            self.config_status_label.setText(f"Plasma ({plasma_config}) + SDDM configured")
             self.config_status_label.setStyleSheet("color: #27ae60;")
-        elif plasma_igpu and sddm_configured:
-            self.config_status_label.setText("iGPU-only Plasma + SDDM configured")
-            self.config_status_label.setStyleSheet("color: #1abc9c;")
-        elif plasma_hybrid:
-            self.config_status_label.setText("Hybrid Plasma configured (SDDM not configured)")
-            self.config_status_label.setStyleSheet("color: #e67e22;")
-        elif plasma_igpu:
-            self.config_status_label.setText("iGPU-only Plasma configured (SDDM not configured)")
+        elif plasma_config:
+            self.config_status_label.setText(f"Plasma configured ({plasma_config}), SDDM not configured")
             self.config_status_label.setStyleSheet("color: #f39c12;")
         elif sddm_configured:
-            self.config_status_label.setText("SDDM is configured for iGPU (Plasma not configured)")
+            self.config_status_label.setText("SDDM configured, Plasma not configured")
             self.config_status_label.setStyleSheet("color: #f39c12;")
         else:
             self.config_status_label.setText("No custom GPU configuration applied (using system defaults)")
             self.config_status_label.setStyleSheet("color: #95a5a6;")
     
     def apply_selection(self):
-        login = self.login_combo.currentData()
-        render = self.render_combo.currentData()
-        display = self.display_combo.currentData()
+        login_card = self.login_combo.currentData()
+        render_card = self.render_combo.currentData()
+        display_card = self.display_combo.currentData()
         
-        desc_parts = []
-        desc_parts.append("Login on iGPU" if login == "igpu" else "Login on dGPU")
-        desc_parts.append("Desktop renders on iGPU" if render == "igpu" else "Desktop renders on dGPU")
+        login_name = self.login_combo.currentText()
+        render_name = self.render_combo.currentText()
+        display_name = self.display_combo.currentText() if display_card != "same" else render_name
         
-        if display == "dgpu":
-            desc_parts.append("Display outputs through dGPU")
-        elif display == "igpu":
-            desc_parts.append("Display outputs through iGPU")
-        else:
-            desc_parts.append(f"Display same as rendering ({render})")
-        
-        description = ", ".join(desc_parts)
+        description = f"Login on {login_name}, Desktop renders on {render_name}, Display outputs through {display_name}"
         
         reply = QMessageBox.warning(
             self, "Warning: Display Output May Change",
             f"You are about to apply: <b>{description}</b>\n\n"
             "This may cause:\n"
             "• A black screen after logging out\n"
-            "• Your display output to switch between the motherboard (iGPU) and dedicated graphics card (dGPU)\n"
+            "• Your display output to switch between GPUs\n"
             "• The desktop session to fail to restart\n\n"
             "Make sure you know which GPU your monitor is physically connected to.\n"
             "If you get a black screen, you may need to move your monitor cable or boot from a live USB to revert.\n\n"
@@ -433,28 +600,26 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return
         
-        if render == "igpu" and display == "dgpu":
-            plasma_cmd = "kwin-hybrid.sh"
-            plasma_content = "export KWIN_DRM_DEVICES=/dev/dri/card1:/dev/dri/card0\nexport WLR_DRM_DEVICES=/dev/dri/card1:/dev/dri/card0"
-        elif render == "igpu" and (display == "igpu" or display == "same"):
-            plasma_cmd = "kwin-igpu.sh"
-            plasma_content = "export KWIN_DRM_DEVICES=/dev/dri/card1\nexport WLR_DRM_DEVICES=/dev/dri/card1"
+        # Build device list for KWIN_DRM_DEVICES
+        if display_card == "same" or display_card == render_card:
+            # Single GPU mode
+            device_list = f"/dev/dri/{render_card}"
         else:
-            plasma_cmd = None
-            plasma_content = ""
-        
-        sddm_card = "card1" if login == "igpu" else "card0"
+            # Multi-GPU mode (render first, display second)
+            device_list = f"/dev/dri/{render_card}:/dev/dri/{display_card}"
         
         cmd_parts = []
-        if plasma_cmd:
-            cmd_parts.append(f"mkdir -p /etc/profile.d && cat > /etc/profile.d/{plasma_cmd} << 'EOF'\n{plasma_content}\nEOF\nchmod 644 /etc/profile.d/{plasma_cmd}")
-            other = "kwin-igpu.sh" if plasma_cmd == "kwin-hybrid.sh" else "kwin-hybrid.sh"
-            cmd_parts.append(f"rm -f /etc/profile.d/{other}")
-        else:
-            cmd_parts.append("rm -f /etc/profile.d/kwin-igpu.sh /etc/profile.d/kwin-hybrid.sh")
         
-        if login in ["igpu", "dgpu"]:
-            cmd_parts.append(f"mkdir -p /etc/systemd/system/sddm.service.d && cat > /etc/systemd/system/sddm.service.d/override.conf << 'EOF'\n[Service]\nEnvironment=KWIN_DRM_DEVICES=/dev/dri/{sddm_card}\nEnvironment=WLR_DRM_DEVICES=/dev/dri/{sddm_card}\nEOF\nsystemctl daemon-reload")
+        # Create plasma config
+        config_content = f"export KWIN_DRM_DEVICES={device_list}\nexport WLR_DRM_DEVICES={device_list}"
+        cmd_parts.append(f"mkdir -p /etc/profile.d && cat > /etc/profile.d/kwin-custom.sh << 'EOF'\n{config_content}\nEOF\nchmod 644 /etc/profile.d/kwin-custom.sh")
+        
+        # Remove old configs
+        cmd_parts.append("rm -f /etc/profile.d/kwin-igpu.sh /etc/profile.d/kwin-hybrid.sh")
+        
+        # Create SDDM config
+        sddm_device = f"/dev/dri/{login_card}"
+        cmd_parts.append(f"mkdir -p /etc/systemd/system/sddm.service.d && cat > /etc/systemd/system/sddm.service.d/override.conf << 'EOF'\n[Service]\nEnvironment=KWIN_DRM_DEVICES={sddm_device}\nEnvironment=WLR_DRM_DEVICES={sddm_device}\nEOF\nsystemctl daemon-reload")
         
         cmd = "bash -c '" + " && ".join(cmd_parts) + "'"
         
@@ -508,10 +673,10 @@ class MainWindow(QMainWindow):
     def revert_config(self):
         reply = QMessageBox.warning(
             self, "Warning: Reverting Configuration",
-            "This will remove all iGPU/dGPU configuration for Plasma and SDDM.\n\n"
+            "This will remove all GPU configuration for Plasma and SDDM.\n\n"
             "This may cause:\n"
             "• A black screen after rebooting\n"
-            "• Your display output to switch between the motherboard (iGPU) and dedicated graphics card (dGPU)\n"
+            "• Your display output to switch between GPUs\n"
             "• The desktop session to use a different GPU than expected\n\n"
             "Your system will return to default GPU selection behavior.\n"
             "If you get a black screen, you may need to move your monitor cable.\n\n"
@@ -523,8 +688,7 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return
         
-        cmd = '''bash -c 'rm -f /etc/profile.d/kwin-igpu.sh
-rm -f /etc/profile.d/kwin-hybrid.sh
+        cmd = '''bash -c 'rm -f /etc/profile.d/kwin-*.sh
 rm -f /etc/systemd/system/sddm.service.d/override.conf
 rmdir /etc/systemd/system/sddm.service.d 2>/dev/null || true
 systemctl daemon-reload' '''
@@ -589,13 +753,17 @@ systemctl daemon-reload' '''
         self.tray.show()
     
     def refresh_stats(self):
-        stats = GPUInfo.get_gpu_stats()
+        # Detect GPUs first (in case hardware changed)
+        self.refresh_gpu_list()
         
-        for key in ["igpu", "dgpu"]:
-            data = stats[key]
+        stats = GPUInfo.get_gpu_stats(self.gpus)
+        
+        for gpu in self.gpus:
+            key = gpu.card_id
+            data = stats.get(key, {})
             
             if self.info_labels.get(f"{key}_name"):
-                self.info_labels[f"{key}_name"].setText(data.get("name", "--"))
+                self.info_labels[f"{key}_name"].setText(data.get("name", gpu.name))
             
             vram_used = data.get("vram_used", 0)
             vram_total = data.get("vram_total", 1)

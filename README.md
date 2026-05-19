@@ -15,7 +15,7 @@ Route GPU assignment for KDE Plasma desktop environments.
 - KDE Plasma (Wayland)
 - Python 3.10+
 - PyQt6
-- AMD ROCm (for GPU monitoring)
+- AMD ROCm (for AMD GPU monitoring)
 - Polkit (for applying configuration)
 
 ## Installation
@@ -78,4 +78,4 @@ See [LICENSE](LICENSE) for more details.
 
 ## Author
 
-Audi Etoffe (2026)
+Audi Etoffe (2026) AcidReignProductions.com
