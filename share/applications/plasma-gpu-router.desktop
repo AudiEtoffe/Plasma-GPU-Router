@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Plasma GPU Router
+Comment=Route GPU assignment for KDE Plasma desktop and login screen
+Exec=python3 %f
+Icon=video-display
+Terminal=false
+Type=Application
+Categories=System;Settings;
+Keywords=GPU;AMD;ROCm;Vulkan;Wayland;Plasma;
