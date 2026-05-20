@@ -25,7 +25,6 @@ import os
 import subprocess
 import json
 import re
-import signal
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -355,35 +354,6 @@ class MainWindow(QMainWindow):
         selection_group.setLayout(selection_layout)
         config_layout.addWidget(selection_group)
         
-        # Browser GPU Management
-        browser_group = QGroupBox("Launch Browser on iGPU")
-        browser_layout = QVBoxLayout()
-        
-        browser_info = QTextEdit()
-        browser_info.setReadOnly(True)
-        browser_info.setMaximumHeight(80)
-        browser_info.setStyleSheet("background-color: #e3f2fd; color: #0d47a1; border: 2px solid #2196f3;")
-        browser_info.setHtml("""
-        <p><b>Launch Browser on iGPU:</b> Opens a new browser instance routed to the integrated GPU. Your existing browser sessions remain untouched. Useful for offloading web content to the iGPU while keeping your main browser on the dGPU.</p>
-        """)
-        browser_layout.addWidget(browser_info)
-        
-        # Browser selection and launch
-        browser_select_layout = QHBoxLayout()
-        browser_select_layout.addWidget(QLabel("Browser:"))
-        
-        self.browser_launch_combo = QComboBox()
-        browser_select_layout.addWidget(self.browser_launch_combo, 1)
-        
-        self.btn_launch_browser = QPushButton("Launch on iGPU")
-        self.btn_launch_browser.clicked.connect(self.launch_browser_on_igpu)
-        self.btn_launch_browser.setStyleSheet("background-color: #27ae60; color: white; padding: 8px;")
-        browser_select_layout.addWidget(self.btn_launch_browser)
-        
-        browser_layout.addLayout(browser_select_layout)
-        browser_group.setLayout(browser_layout)
-        config_layout.addWidget(browser_group)
-        
         # Current status
         status_cfg_group = QGroupBox("Current Configuration")
         status_cfg_layout = QVBoxLayout()
@@ -423,7 +393,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.tabs)
         
         self.check_current_config()
-        self.populate_browser_combo()
     
     def refresh_gpu_list(self):
         """Detect GPUs and update UI"""
@@ -619,95 +588,6 @@ class MainWindow(QMainWindow):
         else:
             self.config_status_label.setText("No custom GPU configuration applied (using system defaults)")
             self.config_status_label.setStyleSheet("color: #95a5a6;")
-    
-    def detect_available_browsers(self):
-        """Detect installed browsers"""
-        browsers = [
-            ("firefox", "Firefox"),
-            ("firefox-esr", "Firefox ESR"),
-            ("google-chrome", "Google Chrome"),
-            ("google-chrome-stable", "Google Chrome"),
-            ("chromium", "Chromium"),
-            ("chromium-browser", "Chromium"),
-            ("brave-browser", "Brave"),
-            ("microsoft-edge", "Microsoft Edge"),
-            ("microsoft-edge-stable", "Microsoft Edge"),
-            ("opera", "Opera"),
-            ("vivaldi", "Vivaldi"),
-            ("zen", "Zen Browser"),
-            ("librewolf", "LibreWolf"),
-            ("waterfox", "Waterfox"),
-        ]
-        
-        available = []
-        seen = set()
-        for exe, name in browsers:
-            if name in seen:
-                continue
-            try:
-                result = subprocess.run(
-                    ["which", exe],
-                    capture_output=True, text=True, timeout=5
-                )
-                if result.returncode == 0:
-                    seen.add(name)
-                    available.append((exe, name, result.stdout.strip()))
-            except:
-                pass
-        
-        return available
-    
-    def populate_browser_combo(self):
-        """Populate the browser launch combo box"""
-        self.browser_launch_combo.clear()
-        browsers = self.detect_available_browsers()
-        
-        if not browsers:
-            self.browser_launch_combo.addItem("No browsers detected")
-            self.btn_launch_browser.setEnabled(False)
-            return
-        
-        self.btn_launch_browser.setEnabled(True)
-        for exe, name, path in browsers:
-            self.browser_launch_combo.addItem(name, exe)
-    
-    def launch_browser_on_igpu(self):
-        """Launch a new browser instance on the iGPU"""
-        exe = self.browser_launch_combo.currentData()
-        name = self.browser_launch_combo.currentText()
-        
-        if not exe or exe == "No browsers detected":
-            QMessageBox.warning(self, "Error", "No browser selected.")
-            return
-        
-        env = os.environ.copy()
-        env["DRI_PRIME"] = "0"
-        
-        # Set Vulkan ICD for AMD iGPU
-        amd_icd_paths = []
-        for icd_path in [
-            "/usr/share/vulkan/icd.d/radeon_icd.i686.json",
-            "/usr/share/vulkan/icd.d/radeon_icd.x86_64.json",
-            "/usr/share/vulkan/icd.d/amd_icd.i686.json",
-            "/usr/share/vulkan/icd.d/amd_icd.x86_64.json",
-        ]:
-            if Path(icd_path).exists():
-                amd_icd_paths.append(icd_path)
-        
-        if amd_icd_paths:
-            env["VK_ICD_FILENAMES"] = ":".join(amd_icd_paths)
-        
-        try:
-            subprocess.Popen(
-                [exe],
-                env=env,
-                start_new_session=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            self.config_log.append(f"\nLaunched {name} on iGPU (DRI_PRIME=0)")
-        except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to launch {name}: {e}")
     
     def apply_selection(self):
         login_card = self.login_combo.currentData()
