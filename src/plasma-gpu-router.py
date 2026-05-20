@@ -32,8 +32,8 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QGroupBox, QTextEdit, QComboBox,
     QProgressBar, QMessageBox, QSystemTrayIcon, QMenu, QTabWidget, QCheckBox
 )
-from PyQt6.QtCore import QTimer, Qt, QProcess
-from PyQt6.QtGui import QFont, QAction
+from PyQt6.QtCore import QTimer, Qt, QProcess, QUrl
+from PyQt6.QtGui import QFont, QAction, QDesktopServices
 
 
 class GPU:
@@ -425,6 +425,14 @@ class MainWindow(QMainWindow):
         status_cfg_layout.addWidget(self.config_status_label)
         status_cfg_group.setLayout(status_cfg_layout)
         config_layout.addWidget(status_cfg_group)
+        
+        # Footer
+        footer = QLabel('<a href="https://www.linktr.ee/etoffe" style="color: #666; text-decoration: none;">© 2026 Audi Étoffe. All rights reserved.</a>')
+        footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        footer.setOpenExternalLinks(True)
+        footer.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse | Qt.TextInteractionFlag.LinksAccessibleByKeyboard)
+        footer.setCursor(Qt.CursorShape.PointingHandCursor)
+        config_layout.addWidget(footer)
         
         config_layout.addStretch()
         self.tabs.addTab(config_tab, "Configuration")
