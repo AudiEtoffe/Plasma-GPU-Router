@@ -9,6 +9,7 @@ Route GPU assignment for KDE Plasma desktop environments.
 - Quick presets for common configurations
 - Compatible with AMD dual-GPU setups (iGPU + dGPU)
 - System tray integration
+- **Dolphin context menu**: Right-click any app to launch it on a specific GPU
 
 ## Requirements
 
@@ -17,6 +18,7 @@ Route GPU assignment for KDE Plasma desktop environments.
 - PyQt6
 - AMD ROCm (for AMD GPU monitoring)
 - Polkit (for applying configuration)
+- kdialog (for GPU selection dialog)
 
 ## Installation
 
@@ -45,6 +47,18 @@ Copy the desktop file to your applications directory:
 cp share/applications/plasma-gpu-router.desktop ~/.local/share/applications/
 ```
 
+### Dolphin Context Menu (GPU Launch)
+
+Install the right-click service menu:
+```bash
+cp src/gpu-launch.py ~/.local/bin/gpu-launch.py
+chmod +x ~/.local/bin/gpu-launch.py
+mkdir -p ~/.local/share/kservices5/ServiceMenus
+cp share/kservices5/ServiceMenus/gpu-launch.desktop ~/.local/share/kservices5/ServiceMenus/
+```
+
+Restart Dolphin or log out/in for the context menu to appear.
+
 ## Usage
 
 ### Quick Presets
@@ -60,6 +74,10 @@ cp share/applications/plasma-gpu-router.desktop ~/.local/share/applications/
 3. Select which GPU outputs the display signal
 4. Click "Apply Configuration" and authenticate with your password
 5. Log out and log back in for changes to take effect
+
+### Launch Apps on Specific GPU
+
+Right-click any `.desktop` file or executable in Dolphin and select **Launch on GPU → Select GPU and Launch...**. A dialog will show your detected GPUs with VRAM usage. Select one and the app will launch with the correct GPU environment variables.
 
 ### BIOS/UEFI Requirements
 

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Service
+X-KDE-ServiceTypes=KonqPopupMenu/Plugin
+MimeType=application/x-desktop;application/x-executable;application/x-sharedlib;
+Actions=LaunchOnGPU;
+X-KDE-Submenu=Launch on GPU
+
+[Desktop Action LaunchOnGPU]
+Name=Select GPU and Launch...
+Exec=python3 ~/.local/bin/gpu-launch.py %f
+Icon=video-display
