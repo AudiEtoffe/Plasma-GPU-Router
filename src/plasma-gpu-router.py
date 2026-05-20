@@ -26,10 +26,11 @@ import subprocess
 import json
 import re
 from pathlib import Path
+from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QGroupBox, QTextEdit, QComboBox,
-    QProgressBar, QMessageBox, QSystemTrayIcon, QMenu, QTabWidget
+    QProgressBar, QMessageBox, QSystemTrayIcon, QMenu, QTabWidget, QCheckBox
 )
 from PyQt6.QtCore import QTimer, Qt, QProcess
 from PyQt6.QtGui import QFont, QAction
@@ -220,6 +221,11 @@ class MainWindow(QMainWindow):
         self.info_labels = {}
         self.gpus = []
         
+        self.config_dir = Path.home() / ".config" / "plasma-gpu-router"
+        self.config_dir.mkdir(parents=True, exist_ok=True)
+        self.config_file = self.config_dir / "config.json"
+        self.config = self.load_config()
+        
         self.refresh_timer = QTimer()
         self.refresh_timer.timeout.connect(self.refresh_stats)
         self.refresh_timer.start(2000)
@@ -227,6 +233,50 @@ class MainWindow(QMainWindow):
         self.setup_ui()
         self.setup_tray()
         self.refresh_stats()
+    
+    def load_config(self):
+        """Load configuration from file"""
+        default = {
+            "dolphin_context_menu": False,
+        }
+        if self.config_file.exists():
+            try:
+                saved = json.loads(self.config_file.read_text())
+                return {**default, **saved}
+            except:
+                pass
+        return default
+    
+    def save_config(self):
+        """Save configuration to file"""
+        self.config_file.write_text(json.dumps(self.config, indent=2))
+    
+    def toggle_dolphin_menu(self, checked):
+        """Enable or disable the Dolphin context menu"""
+        self.config["dolphin_context_menu"] = checked
+        self.save_config()
+        
+        service_menu_dir = Path.home() / ".local" / "share" / "kservices5" / "ServiceMenus"
+        service_menu_dir.mkdir(parents=True, exist_ok=True)
+        dest = service_menu_dir / "gpu-launch.desktop"
+        
+        if checked:
+            # Install service menu
+            src = Path(__file__).parent.parent / "share" / "kservices5" / "ServiceMenus" / "gpu-launch.desktop"
+            if not src.exists():
+                # Fallback to installed location
+                src = Path.home() / ".local" / "share" / "kservices5" / "ServiceMenus" / "gpu-launch.desktop"
+            
+            if src.exists():
+                dest.write_text(src.read_text())
+                self.config_log.append("\nDolphin context menu enabled")
+            else:
+                self.config_log.append("\nWarning: Could not find gpu-launch.desktop source file")
+        else:
+            # Remove service menu
+            if dest.exists():
+                dest.unlink()
+            self.config_log.append("\nDolphin context menu disabled")
     
     def setup_ui(self):
         central = QWidget()
@@ -353,6 +403,19 @@ class MainWindow(QMainWindow):
         selection_layout.addLayout(apply_layout)
         selection_group.setLayout(selection_layout)
         config_layout.addWidget(selection_group)
+        
+        # Settings
+        settings_group = QGroupBox("Settings")
+        settings_layout = QVBoxLayout()
+        
+        self.chk_dolphin_menu = QCheckBox("Enable Dolphin right-click 'Launch on GPU' context menu")
+        self.chk_dolphin_menu.setChecked(self.config.get("dolphin_context_menu", False))
+        self.chk_dolphin_menu.stateChanged.connect(self.toggle_dolphin_menu)
+        self.chk_dolphin_menu.setToolTip("Adds a right-click option in Dolphin to launch apps on a specific GPU. Disabled by default for safety.")
+        settings_layout.addWidget(self.chk_dolphin_menu)
+        
+        settings_group.setLayout(settings_layout)
+        config_layout.addWidget(settings_group)
         
         # Current status
         status_cfg_group = QGroupBox("Current Configuration")
