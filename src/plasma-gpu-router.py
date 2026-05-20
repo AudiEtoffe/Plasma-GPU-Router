@@ -30,7 +30,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QGroupBox, QTextEdit, QComboBox,
-    QProgressBar, QMessageBox, QSystemTrayIcon, QMenu
+    QProgressBar, QMessageBox, QSystemTrayIcon, QMenu, QTabWidget
 )
 from PyQt6.QtCore import QTimer, Qt, QProcess
 from PyQt6.QtGui import QFont, QAction
@@ -234,14 +234,12 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
         
-        # GPU Status Section
-        status_group = QGroupBox("GPU Status")
-        status_layout = QVBoxLayout()
+        # Tab Widget
+        self.tabs = QTabWidget()
         
-        self.gpu_cards_layout = QHBoxLayout()
-        status_layout.addLayout(self.gpu_cards_layout)
-        status_group.setLayout(status_layout)
-        layout.addWidget(status_group)
+        # === Tab 1: Configuration ===
+        config_tab = QWidget()
+        config_layout = QVBoxLayout(config_tab)
         
         # Warning box
         warning_group = QGroupBox("WARNING")
@@ -256,7 +254,7 @@ class MainWindow(QMainWindow):
         """)
         warning_layout.addWidget(warning_text)
         warning_group.setLayout(warning_layout)
-        layout.addWidget(warning_group)
+        config_layout.addWidget(warning_group)
         
         # BIOS/UEFI Settings Info
         bios_group = QGroupBox("BIOS/UEFI Settings (Important)")
@@ -277,7 +275,7 @@ class MainWindow(QMainWindow):
         """)
         bios_layout.addWidget(bios_text)
         bios_group.setLayout(bios_layout)
-        layout.addWidget(bios_group)
+        config_layout.addWidget(bios_group)
         
         # GPU Selection Panel
         selection_group = QGroupBox("GPU Assignment")
@@ -355,7 +353,7 @@ class MainWindow(QMainWindow):
         
         selection_layout.addLayout(apply_layout)
         selection_group.setLayout(selection_layout)
-        layout.addWidget(selection_group)
+        config_layout.addWidget(selection_group)
         
         # Browser GPU Management
         browser_group = QGroupBox("Running Browsers (GPU Assignment)")
@@ -390,7 +388,7 @@ class MainWindow(QMainWindow):
         
         browser_layout.addLayout(browser_btn_layout)
         browser_group.setLayout(browser_layout)
-        layout.addWidget(browser_group)
+        config_layout.addWidget(browser_group)
         
         # Current status
         status_cfg_group = QGroupBox("Current Configuration")
@@ -399,17 +397,36 @@ class MainWindow(QMainWindow):
         self.config_status_label.setFont(QFont("Monospace", 10))
         status_cfg_layout.addWidget(self.config_status_label)
         status_cfg_group.setLayout(status_cfg_layout)
-        layout.addWidget(status_cfg_group)
+        config_layout.addWidget(status_cfg_group)
+        
+        config_layout.addStretch()
+        self.tabs.addTab(config_tab, "Configuration")
+        
+        # === Tab 2: GPU Status & Log ===
+        status_tab = QWidget()
+        status_tab_layout = QVBoxLayout(status_tab)
+        
+        # GPU Status Section
+        status_group = QGroupBox("GPU Status")
+        status_layout = QVBoxLayout()
+        
+        self.gpu_cards_layout = QHBoxLayout()
+        status_layout.addLayout(self.gpu_cards_layout)
+        status_group.setLayout(status_layout)
+        status_tab_layout.addWidget(status_group)
         
         # Log output
         log_group = QGroupBox("Output Log")
         log_layout = QVBoxLayout()
         self.config_log = QTextEdit()
         self.config_log.setReadOnly(True)
-        self.config_log.setMaximumHeight(60)
         log_layout.addWidget(self.config_log)
         log_group.setLayout(log_layout)
-        layout.addWidget(log_group)
+        status_tab_layout.addWidget(log_group)
+        
+        self.tabs.addTab(status_tab, "GPU Status & Log")
+        
+        layout.addWidget(self.tabs)
         
         self.check_current_config()
         self.refresh_browser_list()
